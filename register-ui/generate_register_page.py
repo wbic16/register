@@ -123,6 +123,15 @@ PAGE = """<!DOCTYPE html>
   .meta b { color: inherit; }
   #q { width: 100%; box-sizing: border-box; padding: 9px 12px; font-size: 15px;
        border: 1px solid #9996; border-radius: 8px; margin-bottom: 14px; }
+  #quick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+       margin-bottom: 12px; }
+  #qe { flex: 1 1 340px; box-sizing: border-box; padding: 9px 12px;
+       font-size: 15px; border: 1px solid #4a7dbb; border-radius: 8px; }
+  #quick button { padding: 9px 14px; font-size: 14px; border: 1px solid #9998;
+       border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+  #qe-note { color: #888; font-size: 12px; }
+  tr.pending td { background: #4a7dbb14; }
+  tr.pending .rm { cursor: pointer; color: #c0392b; font-weight: 700; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
   th, td { text-align: left; vertical-align: top; padding: 8px 10px;
            border-bottom: 1px solid #9994; }
@@ -144,7 +153,13 @@ PAGE = """<!DOCTYPE html>
 <main>
   <h1>⏳ Waiting on Will — the register</h1>
   <div class="meta"><b>$count open items</b> · oldest first · generated $generated
-  · source: waiting-on-will.md (register of record) · read-only</div>
+  · source: waiting-on-will.md (register of record) · register read-only, quick-entry drafts are browser-local</div>
+  <div id="quick">
+    <input id="qe" type="text" placeholder="Quick entry — type a new wait item, Enter drops it on top of the pile…" autocomplete="off">
+    <button id="qe-add" type="button">Add to pile</button>
+    <button id="qe-copy" type="button">Copy pending lines</button>
+    <span id="qe-note">Drafts stay in this browser until Emise numbers them into the register.</span>
+  </div>
   <input id="q" type="search" placeholder="Filter items… (number, word, tier)" autocomplete="off">
   <table id="grid">
     <thead><tr><th>#</th><th>Item</th><th>Action needed</th><th>Tier</th>
@@ -160,12 +175,11 @@ $rows
 </main>
 <script>
   const q = document.getElementById('q');
-  const rows = Array.from(document.querySelectorAll('#grid tbody tr'));
   const none = document.getElementById('none');
   q.addEventListener('input', () => {
     const needle = q.value.trim().toLowerCase();
     let visible = 0;
-    for (const r of rows) {
+    for (const r of document.querySelectorAll('#grid tbody tr')) {
       const hit = !needle || r.textContent.toLowerCase().includes(needle);
       r.style.display = hit ? '' : 'none';
       if (hit) visible++;
@@ -173,6 +187,48 @@ $rows
     none.style.display = visible ? 'none' : 'block';
   });
   q.focus();
+
+  // Quick entry: drafts land on top of the pile, persist in this browser
+  // (localStorage), and leave only when Emise numbers them into the
+  // register of record. "Copy pending lines" hands them over in one paste.
+  const QE_KEY = 'register-quick-entries';
+  const tbody = document.querySelector('#grid tbody');
+  const qe = document.getElementById('qe');
+  const loadQE = () => { try { return JSON.parse(localStorage.getItem(QE_KEY)) || []; } catch { return []; } };
+  const saveQE = list => localStorage.setItem(QE_KEY, JSON.stringify(list));
+  function renderQE() {
+    tbody.querySelectorAll('tr.pending').forEach(r => r.remove());
+    const list = loadQE();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const tr = document.createElement('tr');
+      tr.className = 'pending';
+      const today = new Date().toISOString().slice(0, 10);
+      tr.innerHTML = '<td class="num">new</td><td class="title"></td>' +
+        '<td class="action">pending — not numbered yet</td><td>draft</td>' +
+        '<td class="since">' + today + '</td>' +
+        '<td class="age"><span class="rm" title="Remove draft">✕</span></td>';
+      tr.querySelector('.title').textContent = list[i];
+      tr.querySelector('.rm').addEventListener('click', () => {
+        const l = loadQE(); l.splice(i, 1); saveQE(l); renderQE();
+      });
+      tbody.prepend(tr);
+    }
+  }
+  function addQE() {
+    const text = qe.value.trim();
+    if (!text) return;
+    const list = loadQE(); list.push(text); saveQE(list);
+    qe.value = ''; renderQE(); qe.focus();
+  }
+  document.getElementById('qe-add').addEventListener('click', addQE);
+  qe.addEventListener('keydown', e => { if (e.key === 'Enter') addQE(); });
+  document.getElementById('qe-copy').addEventListener('click', async () => {
+    const list = loadQE();
+    if (!list.length) return;
+    const lines = list.map(t => '- Quick entry (unnumbered): ' + t).join('\n');
+    try { await navigator.clipboard.writeText(lines); } catch { qe.value = lines; qe.select(); }
+  });
+  renderQE();
 </script>
 </body>
 </html>
