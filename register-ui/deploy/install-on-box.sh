@@ -39,7 +39,10 @@ if [ -z "${IP:-}" ]; then
 fi
 
 echo "== verify page over HTTP =="
-curl -fsS "http://$DOMAIN/" | grep -q "open items"
+# NOTE: never pipe curl into grep -q here — grep -q exits on first match,
+# curl dies with SIGPIPE (exit 23), and pipefail turns that into a failure.
+curl -fsS "http://$DOMAIN/" -o /tmp/register-verify-http.html
+grep -q "open items" /tmp/register-verify-http.html
 echo "HTTP OK"
 
 if [ -e "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
@@ -59,5 +62,6 @@ sudo nginx -t
 sudo systemctl reload nginx
 
 echo "== verify page over HTTPS =="
-curl -fsS "https://$DOMAIN/" | grep -q "open items"
+curl -fsS "https://$DOMAIN/" -o /tmp/register-verify-https.html
+grep -q "open items" /tmp/register-verify-https.html
 echo "HTTPS OK — https://$DOMAIN is live"
