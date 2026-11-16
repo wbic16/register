@@ -25,7 +25,7 @@ PREAUTH_COOKIE = "regsvc_pre"
 MAX_BODY = 64 * 1024
 MAX_ENTRY_CHARS = 2000
 MAX_NOTE_CHARS = 4000
-DONE_PATH = re.compile(r"^/api/items/(\d+)/done$")
+CLOSE_PATH = re.compile(r"^/api/items/(\d+)/(done|cancel)$")
 
 
 def _json(status, obj, extra_headers=None):
@@ -176,9 +176,11 @@ class RegisterApp:
             return self._list_log(headers, self.entries, params)
         if method == "GET" and path_only == "/api/resolutions":
             return self._list_log(headers, self.resolutions, params)
-        m = DONE_PATH.match(path_only)
+        m = CLOSE_PATH.match(path_only)
         if method == "POST" and m:
-            return self._mark_done(headers, body, int(m.group(1)))
+            outcome = "done" if m.group(2) == "done" else "cancelled"
+            return self._close_item(headers, body, int(m.group(1)),
+                                    outcome)
         if method == "POST" and path_only == "/api/webauthn/register/options":
             return self._wa_register_options(headers)
         if method == "POST" and path_only == "/api/webauthn/register/verify":
@@ -267,7 +269,10 @@ class RegisterApp:
         atoms = log.read_all(after_seq=after)
         return _json(200, {"atoms": atoms, "last_seq": log.last_seq})
 
-    def _mark_done(self, headers, body, number):
+    def _close_item(self, headers, body, number, outcome):
+        """Shared handler for /done (outcome "done") and /cancel
+        (outcome "cancelled") — identical auth, CSRF, number, and
+        note contracts; only the recorded outcome differs."""
         _, rec, err = self._require_session(headers)
         if err:
             return err
@@ -275,7 +280,7 @@ class RegisterApp:
         if err:
             return err
         # Optional close rationale: {"note": "..."} captured by the
-        # page's Done dialog. No body (or an empty object) is exactly
+        # page's close dialog. No body (or an empty object) is exactly
         # the pre-dialog behavior — a bare resolution atom.
         data = self._body_json(body)
         if data is None:
@@ -295,7 +300,7 @@ class RegisterApp:
         if number not in known:
             return _err(404, "unknown register number")
         fields = {"type": "resolution", "register_number": number,
-                  "user": rec["uid"]}
+                  "user": rec["uid"], "outcome": outcome}
         if note:
             fields["note"] = note
         atom = self.resolutions.append(fields)

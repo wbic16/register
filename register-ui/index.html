@@ -25,9 +25,10 @@
        margin-bottom: 10px; }
   #authbar input { padding: 8px 10px; font-size: 14px;
        border: 1px solid #9996; border-radius: 8px; }
-  #authbar button, .done-btn { padding: 7px 12px; font-size: 13px;
+  #authbar button, .done-btn, .cancel-btn { padding: 7px 12px; font-size: 13px;
        border: 1px solid #9998; border-radius: 8px; background: transparent;
        color: inherit; cursor: pointer; }
+  .done-cell .cancel-btn { margin-left: 6px; }
   #auth-note { color: #888; font-size: 12px; }
   #auth-err, #qe-err { color: #c0392b; font-size: 13px; font-weight: 600; }
   #qe-err { display: none; margin-bottom: 10px; }
@@ -49,6 +50,8 @@
        color: inherit; cursor: pointer; }
   tr.done-pending td { opacity: .55; text-decoration: line-through; }
   tr.done-pending td.done-cell { opacity: 1; text-decoration: none; }
+  tr.cancel-pending td { opacity: .7; font-style: italic; }
+  tr.cancel-pending td.done-cell { opacity: 1; font-style: normal; }
   .done-note { font-size: 12px; color: #888; }
   tr.pending td { background: #4a7dbb14; }
   tr.pending .rm { cursor: pointer; color: #c0392b; font-weight: 700; }
@@ -72,15 +75,15 @@
 <body>
 <main>
   <h1>⏳ Waiting on Will — the register</h1>
-  <div class="meta"><b>83 open items</b> · oldest first · generated Sun 2026-11-15 22:57 CST
-  · source: waiting-on-will.md (register of record) · entries &amp; done-marks queue via the register service; Emise numbers/closes them into the register</div>
+  <div class="meta"><b>83 open items</b> · oldest first · generated Sun 2026-11-15 23:04 CST
+  · source: waiting-on-will.md (register of record) · entries &amp; close-marks queue via the register service; Emise numbers/closes them into the register</div>
   <div id="authbar">
     <span id="auth-out">
       <input id="au-uid" type="text" placeholder="LDAP user (e.g. will)" autocomplete="username">
       <input id="au-pw" type="password" placeholder="LDAP password" autocomplete="current-password">
       <button id="au-login" type="button">Log in</button>
       <button id="au-passkey" type="button">Use a passkey</button>
-      <span id="auth-note">Log in to add to the pile or mark items done.</span>
+      <span id="auth-note">Log in to add to the pile or close items.</span>
     </span>
     <span id="auth-in" style="display:none">
       Logged in as <b id="auth-user"></b>
@@ -371,11 +374,13 @@
   });
   q.focus();
 
-  // ---- Register service (v2): auth, quick entry, Done buttons ----
+  // ---- Register service (v2): auth, quick entry, close buttons ----
   // The page is static; all state lives in the service at /api/.
   // Logged out: read-only grid, exactly as v1. Logged in: quick entry
-  // POSTs to the service queue, and each row grows a Done button whose
-  // mark lands in the service's resolutions log. Emise drains both.
+  // POSTs to the service queue, and each row grows Done and Cancel
+  // buttons whose marks land in the service's resolutions log (with
+  // an outcome: done completes, cancelled closes without completion).
+  // Emise drains both.
   const tbody = document.querySelector('#grid tbody');
   const qe = document.getElementById('qe');
   const qeErr = document.getElementById('qe-err');
@@ -621,13 +626,15 @@
     }
   }
 
-  // -- Done buttons (authenticated only; injected, never in static HTML) --
+  // -- Close buttons (authenticated only; injected, never in static
+  // HTML): Done completes the item; Cancel closes it WITHOUT
+  // completion. Both open the shared close dialog. --
   function injectDoneButtons() {
     if (document.getElementById('done-th')) return;
     const headRow = document.querySelector('#grid thead tr');
     const th = document.createElement('th');
     th.id = 'done-th';
-    th.textContent = 'Done?';
+    th.textContent = 'Close';
     headRow.appendChild(th);
     document.querySelectorAll('#grid tbody tr[data-n]').forEach(tr => {
       const td = document.createElement('td');
@@ -639,6 +646,12 @@
       btn.textContent = 'Done';
       btn.addEventListener('click', () => onDoneClick(tr, td, n));
       td.appendChild(btn);
+      const cbtn = document.createElement('button');
+      cbtn.type = 'button';
+      cbtn.className = 'cancel-btn';
+      cbtn.textContent = 'Cancel';
+      cbtn.addEventListener('click', () => onCancelClick(tr, td, n));
+      td.appendChild(cbtn);
       tr.appendChild(td);
     });
   }
@@ -649,12 +662,38 @@
     document.querySelectorAll('#grid tbody td.done-cell').forEach(td => td.remove());
     document.querySelectorAll('#grid tbody tr.done-pending')
       .forEach(tr => tr.classList.remove('done-pending'));
+    document.querySelectorAll('#grid tbody tr.cancel-pending')
+      .forEach(tr => tr.classList.remove('cancel-pending'));
   }
 
-  // -- Done dialog (one shared <dialog>, created lazily on first use;
-  // collects an optional close rationale sent with the done POST) --
+  // -- Close dialog (one shared <dialog>, created lazily on first
+  // use; collects an optional rationale sent with the close POST).
+  // Two modes: 'done' completes the item; 'cancel' closes it WITHOUT
+  // completion. The dismiss button is labelled "Back" in both modes
+  // so it can never be confused with the "Cancel entry" action. --
   let doneDialog = null;
-  let doneCtx = null;  // {tr, td, n} of the row being closed
+  let doneCtx = null;  // {tr, td, n, mode} of the row being closed
+
+  const CLOSE_MODES = {
+    done: {
+      head: n => 'Mark #' + n + ' done',
+      confirm: 'Mark done',
+      placeholder: 'Rationale or instructions for Emise (optional)',
+      endpoint: 'done',
+      rowClass: 'done-pending',
+      cellNote: 'done — pending Emise’s closure pass',
+      failVerb: 'Marking'
+    },
+    cancel: {
+      head: n => 'Cancel #' + n + ' without completing',
+      confirm: 'Cancel entry',
+      placeholder: 'Why is this being cancelled? (optional)',
+      endpoint: 'cancel',
+      rowClass: 'cancel-pending',
+      cellNote: 'cancelled — pending Emise’s closure pass',
+      failVerb: 'Cancelling'
+    }
+  };
 
   function ensureDoneDialog() {
     if (doneDialog) return doneDialog;
@@ -667,62 +706,69 @@
       'for Emise (optional)"></textarea>' +
       '<div id="done-err"></div>' +
       '<div class="dlg-btns">' +
-      '<button type="button" id="done-cancel-btn">Cancel</button>' +
+      '<button type="button" id="done-dismiss-btn">Back</button>' +
       '<button type="button" id="done-confirm-btn">Mark done</button>' +
       '</div>';
     document.body.appendChild(dlg);
-    dlg.querySelector('#done-cancel-btn')
+    dlg.querySelector('#done-dismiss-btn')
       .addEventListener('click', () => dlg.close());
     dlg.querySelector('#done-confirm-btn')
-      .addEventListener('click', submitDone);
+      .addEventListener('click', submitClose);
     // Backdrop click closes without queueing anything (Esc does too,
-    // natively). Only a "Mark done" click ever POSTs.
+    // natively). Only a confirm click ever POSTs.
     dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
     doneDialog = dlg;
     return dlg;
   }
 
-  function onDoneClick(tr, td, n) {
+  function openCloseDialog(tr, td, n, mode) {
     const dlg = ensureDoneDialog();
-    doneCtx = { tr: tr, td: td, n: n };
-    dlg.querySelector('#done-dlg-head').textContent = 'Mark #' + n + ' done';
+    const cfg = CLOSE_MODES[mode];
+    doneCtx = { tr: tr, td: td, n: n, mode: mode };
+    dlg.querySelector('#done-dlg-head').textContent = cfg.head(n);
     const titleCell = tr.querySelector('td.title');
     dlg.querySelector('#done-dlg-title').textContent =
       titleCell ? titleCell.textContent : '';
     const note = dlg.querySelector('#done-note');
     note.value = '';
+    note.placeholder = cfg.placeholder;
     dlg.querySelector('#done-err').textContent = '';
     const confirm = dlg.querySelector('#done-confirm-btn');
     confirm.disabled = false;
-    confirm.textContent = 'Mark done';
+    confirm.textContent = cfg.confirm;
     dlg.showModal();
     note.focus();
   }
 
-  function submitDone() {
+  function onDoneClick(tr, td, n) { openCloseDialog(tr, td, n, 'done'); }
+  function onCancelClick(tr, td, n) { openCloseDialog(tr, td, n, 'cancel'); }
+
+  function submitClose() {
     if (!doneCtx) return;
     const dlg = doneDialog;
     const ctx = doneCtx;
+    const cfg = CLOSE_MODES[ctx.mode];
     const confirm = dlg.querySelector('#done-confirm-btn');
     const errLine = dlg.querySelector('#done-err');
     confirm.disabled = true;
     confirm.textContent = '…';
     errLine.textContent = '';
     const note = dlg.querySelector('#done-note').value;
-    api('POST', '/api/items/' + ctx.n + '/done', { note: note }, true)
+    api('POST', '/api/items/' + ctx.n + '/' + cfg.endpoint,
+        { note: note }, true)
       .then(res => {
         if (res.status === 201) {
           doneCtx = null;
           dlg.close();
-          ctx.tr.classList.add('done-pending');
+          ctx.tr.classList.add(cfg.rowClass);
           ctx.td.innerHTML =
-            '<span class="done-note">done — pending Emise’s closure pass</span>';
+            '<span class="done-note">' + cfg.cellNote + '</span>';
         } else {
           // Keep the dialog (and the typed note) open; the row is
           // NOT marked — nothing was queued.
           confirm.disabled = false;
-          confirm.textContent = 'Mark done';
-          errLine.textContent = 'Marking #' + ctx.n + ' done failed (' +
+          confirm.textContent = cfg.confirm;
+          errLine.textContent = cfg.failVerb + ' #' + ctx.n + ' failed (' +
             res.status + ') — NOT queued.';
           if (res.status === 401) refreshSession();
         }
@@ -731,18 +777,25 @@
 
   async function loadResolutions() {
     // Reflect marks already queued (e.g. from another device) so a row
-    // Will already marked does not invite a second click.
+    // Will already closed does not invite a second click. Atoms carry
+    // an outcome: "cancelled" renders the cancelled style; anything
+    // else — including atoms written before the field existed —
+    // renders as done. If a number appears twice, the latest wins.
     const res = await api('GET', '/api/resolutions');
     if (res.status !== 200 || !res.data) return;
-    const doneNums = {};
-    res.data.atoms.forEach(a => { doneNums[a.register_number] = true; });
+    const outcomes = {};
+    res.data.atoms.forEach(a => {
+      outcomes[a.register_number] =
+        a.outcome === 'cancelled' ? 'cancel' : 'done';
+    });
     document.querySelectorAll('#grid tbody tr[data-n]').forEach(tr => {
       const n = tr.getAttribute('data-n');
-      if (!doneNums[n]) return;
-      tr.classList.add('done-pending');
+      if (!outcomes[n]) return;
+      const cfg = CLOSE_MODES[outcomes[n]];
+      tr.classList.add(cfg.rowClass);
       const td = tr.querySelector('td.done-cell');
       if (td) td.innerHTML =
-        '<span class="done-note">done — pending Emise’s closure pass</span>';
+        '<span class="done-note">' + cfg.cellNote + '</span>';
     });
   }
 
