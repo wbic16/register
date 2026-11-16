@@ -134,13 +134,28 @@ PAGE = """<!DOCTYPE html>
        margin-bottom: 10px; }
   #authbar input { padding: 8px 10px; font-size: 14px;
        border: 1px solid #9996; border-radius: 8px; }
-  #authbar button, .done-btn, .done-cancel { padding: 7px 12px; font-size: 13px;
+  #authbar button, .done-btn { padding: 7px 12px; font-size: 13px;
        border: 1px solid #9998; border-radius: 8px; background: transparent;
        color: inherit; cursor: pointer; }
   #auth-note { color: #888; font-size: 12px; }
   #auth-err, #qe-err { color: #c0392b; font-size: 13px; font-weight: 600; }
   #qe-err { display: none; margin-bottom: 10px; }
-  .done-btn.armed { border-color: #c0392b; color: #c0392b; font-weight: 700; }
+  #done-dialog { border: 1px solid #9998; border-radius: 10px;
+       padding: 18px; width: min(480px, calc(100% - 48px));
+       background: Canvas; color: inherit; }
+  #done-dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  #done-dialog h2 { font-size: 16px; margin: 0 0 6px; }
+  #done-dialog .dlg-title { font-weight: 600; margin-bottom: 10px; }
+  #done-note { width: 100%; box-sizing: border-box; min-height: 84px;
+       padding: 9px 12px; font-size: 14px; border: 1px solid #9996;
+       border-radius: 8px; background: transparent; color: inherit; }
+  #done-err { color: #c0392b; font-size: 13px; font-weight: 600;
+       min-height: 18px; margin-top: 8px; }
+  #done-dialog .dlg-btns { display: flex; gap: 8px;
+       justify-content: flex-end; margin-top: 10px; }
+  #done-dialog .dlg-btns button { padding: 7px 12px; font-size: 13px;
+       border: 1px solid #9998; border-radius: 8px; background: transparent;
+       color: inherit; cursor: pointer; }
   tr.done-pending td { opacity: .55; text-decoration: line-through; }
   tr.done-pending td.done-cell { opacity: 1; text-decoration: none; }
   .done-note { font-size: 12px; color: #888; }
@@ -483,7 +498,7 @@ $rows
       btn.type = 'button';
       btn.className = 'done-btn';
       btn.textContent = 'Done';
-      btn.addEventListener('click', () => onDoneClick(tr, td, btn, n));
+      btn.addEventListener('click', () => onDoneClick(tr, td, n));
       td.appendChild(btn);
       tr.appendChild(td);
     });
@@ -497,53 +512,82 @@ $rows
       .forEach(tr => tr.classList.remove('done-pending'));
   }
 
-  function onDoneClick(tr, td, btn, n) {
-    if (!btn.dataset.armed) {
-      // First click arms an inline confirm; a stray misclick queues nothing.
-      btn.dataset.armed = '1';
-      btn.textContent = 'Confirm done?';
-      btn.classList.add('armed');
-      const cancel = document.createElement('button');
-      cancel.type = 'button';
-      cancel.className = 'done-cancel';
-      cancel.textContent = '✕';
-      td.appendChild(cancel);
-      const disarm = () => {
-        delete btn.dataset.armed;
-        btn.textContent = 'Done';
-        btn.classList.remove('armed');
-        cancel.remove();
-      };
-      btn._disarm = disarm;
-      btn._timer = setTimeout(disarm, 6000);
-      cancel.addEventListener('click', () => {
-        clearTimeout(btn._timer);
-        disarm();
+  // -- Done dialog (one shared <dialog>, created lazily on first use;
+  // collects an optional close rationale sent with the done POST) --
+  let doneDialog = null;
+  let doneCtx = null;  // {tr, td, n} of the row being closed
+
+  function ensureDoneDialog() {
+    if (doneDialog) return doneDialog;
+    const dlg = document.createElement('dialog');
+    dlg.id = 'done-dialog';
+    dlg.innerHTML =
+      '<h2 id="done-dlg-head">Mark done</h2>' +
+      '<div class="dlg-title" id="done-dlg-title"></div>' +
+      '<textarea id="done-note" placeholder="Rationale or instructions ' +
+      'for Emise (optional)"></textarea>' +
+      '<div id="done-err"></div>' +
+      '<div class="dlg-btns">' +
+      '<button type="button" id="done-cancel-btn">Cancel</button>' +
+      '<button type="button" id="done-confirm-btn">Mark done</button>' +
+      '</div>';
+    document.body.appendChild(dlg);
+    dlg.querySelector('#done-cancel-btn')
+      .addEventListener('click', () => dlg.close());
+    dlg.querySelector('#done-confirm-btn')
+      .addEventListener('click', submitDone);
+    // Backdrop click closes without queueing anything (Esc does too,
+    // natively). Only a "Mark done" click ever POSTs.
+    dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+    doneDialog = dlg;
+    return dlg;
+  }
+
+  function onDoneClick(tr, td, n) {
+    const dlg = ensureDoneDialog();
+    doneCtx = { tr: tr, td: td, n: n };
+    dlg.querySelector('#done-dlg-head').textContent = 'Mark #' + n + ' done';
+    const titleCell = tr.querySelector('td.title');
+    dlg.querySelector('#done-dlg-title').textContent =
+      titleCell ? titleCell.textContent : '';
+    const note = dlg.querySelector('#done-note');
+    note.value = '';
+    dlg.querySelector('#done-err').textContent = '';
+    const confirm = dlg.querySelector('#done-confirm-btn');
+    confirm.disabled = false;
+    confirm.textContent = 'Mark done';
+    dlg.showModal();
+    note.focus();
+  }
+
+  function submitDone() {
+    if (!doneCtx) return;
+    const dlg = doneDialog;
+    const ctx = doneCtx;
+    const confirm = dlg.querySelector('#done-confirm-btn');
+    const errLine = dlg.querySelector('#done-err');
+    confirm.disabled = true;
+    confirm.textContent = '…';
+    errLine.textContent = '';
+    const note = dlg.querySelector('#done-note').value;
+    api('POST', '/api/items/' + ctx.n + '/done', { note: note }, true)
+      .then(res => {
+        if (res.status === 201) {
+          doneCtx = null;
+          dlg.close();
+          ctx.tr.classList.add('done-pending');
+          ctx.td.innerHTML =
+            '<span class="done-note">done — pending Emise’s closure pass</span>';
+        } else {
+          // Keep the dialog (and the typed note) open; the row is
+          // NOT marked — nothing was queued.
+          confirm.disabled = false;
+          confirm.textContent = 'Mark done';
+          errLine.textContent = 'Marking #' + ctx.n + ' done failed (' +
+            res.status + ') — NOT queued.';
+          if (res.status === 401) refreshSession();
+        }
       });
-      return;
-    }
-    clearTimeout(btn._timer);
-    if (btn._disarm) btn._disarm();
-    btn.disabled = true;
-    btn.textContent = '…';
-    // Optimistic: mark the row now; revert loudly if the POST fails.
-    tr.classList.add('done-pending');
-    api('POST', '/api/items/' + n + '/done', {}, true).then(res => {
-      if (res.status === 201) {
-        td.innerHTML = '<span class="done-note">done — pending Emise’s closure pass</span>';
-      } else {
-        tr.classList.remove('done-pending');
-        td.innerHTML = '';
-        const retry = document.createElement('button');
-        retry.type = 'button';
-        retry.className = 'done-btn';
-        retry.textContent = 'Done';
-        retry.addEventListener('click', () => onDoneClick(tr, td, retry, n));
-        td.appendChild(retry);
-        showErr('Marking #' + n + ' done failed (' + res.status + ') — NOT queued.');
-        if (res.status === 401) refreshSession();
-      }
-    });
   }
 
   async function loadResolutions() {

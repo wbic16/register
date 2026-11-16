@@ -24,6 +24,7 @@ SESSION_COOKIE = "regsvc_session"
 PREAUTH_COOKIE = "regsvc_pre"
 MAX_BODY = 64 * 1024
 MAX_ENTRY_CHARS = 2000
+MAX_NOTE_CHARS = 4000
 DONE_PATH = re.compile(r"^/api/items/(\d+)/done$")
 
 
@@ -177,7 +178,7 @@ class RegisterApp:
             return self._list_log(headers, self.resolutions, params)
         m = DONE_PATH.match(path_only)
         if method == "POST" and m:
-            return self._mark_done(headers, int(m.group(1)))
+            return self._mark_done(headers, body, int(m.group(1)))
         if method == "POST" and path_only == "/api/webauthn/register/options":
             return self._wa_register_options(headers)
         if method == "POST" and path_only == "/api/webauthn/register/verify":
@@ -266,21 +267,38 @@ class RegisterApp:
         atoms = log.read_all(after_seq=after)
         return _json(200, {"atoms": atoms, "last_seq": log.last_seq})
 
-    def _mark_done(self, headers, number):
+    def _mark_done(self, headers, body, number):
         _, rec, err = self._require_session(headers)
         if err:
             return err
         err = self._require_csrf(headers, rec)
         if err:
             return err
+        # Optional close rationale: {"note": "..."} captured by the
+        # page's Done dialog. No body (or an empty object) is exactly
+        # the pre-dialog behavior — a bare resolution atom.
+        data = self._body_json(body)
+        if data is None:
+            return _err(400, "bad JSON")
+        if not isinstance(data, dict):
+            return _err(400, "body must be a JSON object")
+        note = data.get("note")
+        if note is not None:
+            if not isinstance(note, str):
+                return _err(400, "note must be a string")
+            note = note.strip()
+            if len(note) > MAX_NOTE_CHARS:
+                return _err(400, "note too long")
         known = self._known_numbers()
         if known is None:
             return _err(503, "register numbers unavailable")
         if number not in known:
             return _err(404, "unknown register number")
-        atom = self.resolutions.append(
-            {"type": "resolution", "register_number": number,
-             "user": rec["uid"]})
+        fields = {"type": "resolution", "register_number": number,
+                  "user": rec["uid"]}
+        if note:
+            fields["note"] = note
+        atom = self.resolutions.append(fields)
         return _json(201, {"ok": True, "seq": atom["seq"]})
 
     # -- WebAuthn: registration (requires a session) ------------------------
