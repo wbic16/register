@@ -203,6 +203,7 @@ class TestDone(AppTestCase):
         self.assertEqual(len(atoms), 1)
         self.assertEqual(atoms[0]["register_number"], 9)
         self.assertEqual(atoms[0]["user"], "will")
+        self.assertEqual(atoms[0]["outcome"], "done")
 
     def test_done_twice_records_both_atoms(self):
         # Idempotency lives at drain time; the log keeps both events.
@@ -306,6 +307,53 @@ class TestDone(AppTestCase):
         csrf = self.login()
         status, _, _ = self.client.call(
             "POST", "/api/items/9/done", {"note": 42}, csrf=csrf)
+        self.assertEqual(status, 400)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertEqual(body["atoms"], [])
+
+
+class TestCancel(AppTestCase):
+    """Cancel closes an item WITHOUT completion: same contract as
+    Done, but the atom's outcome is "cancelled", never "done"."""
+
+    def test_cancel_records_cancelled_atom_with_note(self):
+        csrf = self.login()
+        status, body, _ = self.client.call(
+            "POST", "/api/items/9/cancel",
+            {"note": "  overtaken by the LDAP rollout  "}, csrf=csrf)
+        self.assertEqual((status, body["seq"]), (201, 1))
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        atoms = body["atoms"]
+        self.assertEqual(len(atoms), 1)
+        self.assertEqual(atoms[0]["register_number"], 9)
+        self.assertEqual(atoms[0]["user"], "will")
+        self.assertEqual(atoms[0]["outcome"], "cancelled")
+        # Stored stripped, on the atom itself.
+        self.assertEqual(atoms[0]["note"],
+                         "overtaken by the LDAP rollout")
+
+    def test_cancel_no_body_outcome_no_note(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/cancel", None, csrf=csrf)
+        self.assertEqual(status, 201)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        atom = body["atoms"][0]
+        self.assertEqual(atom["outcome"], "cancelled")
+        self.assertNotIn("note", atom)
+
+    def test_cancel_unknown_number_404(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/999/cancel", {}, csrf=csrf)
+        self.assertEqual(status, 404)
+
+    def test_cancel_note_over_cap_400(self):
+        # Note validation mirrors Done exactly.
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/cancel", {"note": "x" * 4001},
+            csrf=csrf)
         self.assertEqual(status, 400)
         status, body, _ = self.client.call("GET", "/api/resolutions")
         self.assertEqual(body["atoms"], [])
