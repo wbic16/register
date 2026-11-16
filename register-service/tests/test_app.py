@@ -237,6 +237,79 @@ class TestDone(AppTestCase):
                                    csrf=csrf)
         self.assertEqual(status, 503)
 
+    def test_done_with_note_stores_note(self):
+        csrf = self.login()
+        status, body, _ = self.client.call(
+            "POST", "/api/items/9/done",
+            {"note": "  closed per chat — duplicate of #21  "}, csrf=csrf)
+        self.assertEqual((status, body["seq"]), (201, 1))
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        atoms = body["atoms"]
+        self.assertEqual(len(atoms), 1)
+        # Stored stripped, on the atom itself.
+        self.assertEqual(atoms[0]["note"],
+                         "closed per chat — duplicate of #21")
+
+    def test_done_no_body_no_note_field(self):
+        # The pre-dialog client shape: no request body at all.
+        csrf = self.login()
+        status, body, _ = self.client.call(
+            "POST", "/api/items/9/done", None, csrf=csrf)
+        self.assertEqual(status, 201)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertNotIn("note", body["atoms"][0])
+
+    def test_done_blank_note_omitted(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/done", {"note": "   "}, csrf=csrf)
+        self.assertEqual(status, 201)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertNotIn("note", body["atoms"][0])
+
+    def test_done_note_at_cap_accepted(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/done", {"note": "x" * 4000}, csrf=csrf)
+        self.assertEqual(status, 201)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertEqual(len(body["atoms"][0]["note"]), 4000)
+
+    def test_done_note_over_cap_400(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/done", {"note": "x" * 4001}, csrf=csrf)
+        self.assertEqual(status, 400)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertEqual(body["atoms"], [])
+
+    def test_done_malformed_json_400(self):
+        csrf = self.login()
+        headers = {
+            "Cookie": "; ".join(
+                f"{k}={v}" for k, v in self.client.cookies.items()),
+            "X-CSRF-Token": csrf,
+        }
+        status, _, _ = self.app.handle(
+            "POST", "/api/items/9/done", headers, b"{not json")
+        self.assertEqual(status, 400)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertEqual(body["atoms"], [])
+
+    def test_done_non_object_body_400(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/done", ["note"], csrf=csrf)
+        self.assertEqual(status, 400)
+
+    def test_done_non_string_note_400(self):
+        csrf = self.login()
+        status, _, _ = self.client.call(
+            "POST", "/api/items/9/done", {"note": 42}, csrf=csrf)
+        self.assertEqual(status, 400)
+        status, body, _ = self.client.call("GET", "/api/resolutions")
+        self.assertEqual(body["atoms"], [])
+
 
 class TestPasskeys(AppTestCase):
     def enroll(self):
