@@ -16,6 +16,12 @@ Config via environment:
   REGSVC_DRAIN_TOKEN  optional; when set, header X-Drain-Token with
                       this value may read (only) the two queue logs —
                       Emise's ticks drain headlessly with it
+  REGSVC_DRAIN_USER   the login whose scope the drain token reads
+                      (per-user drain); without it the drain token
+                      authorizes nothing
+  REGSVC_NUMBERS_OWNER  owner uid for register numbers in a legacy
+                      flat-list numbers file (the scoped object form
+                      names each number's owner in the file itself)
 
 Modes:
   (default)   serve
@@ -63,6 +69,8 @@ def build_app(env=None):
         ceremonies=ceremonies,
         secret=secret,
         drain_token=env.get("REGSVC_DRAIN_TOKEN") or None,
+        drain_user=env.get("REGSVC_DRAIN_USER") or None,
+        numbers_owner=env.get("REGSVC_NUMBERS_OWNER") or None,
         numbers_file=env.get(
             "REGSVC_NUMBERS_FILE",
             "/sites/web/register.phext.io/register-numbers.json"),
