@@ -376,7 +376,7 @@ $rows
     try {
       cred = await navigator.credentials.get(
         { publicKey: decodeOptions(res.text, false) });
-    } catch (e) { showAuthErr('Passkey ceremony cancelled.'); return; }
+    } catch (e) { showAuthErr('Passkey ceremony failed: ' + (e.name || 'Error') + (e.message ? ' — ' + e.message : '')); return; }
     const verify = await api('POST', '/api/webauthn/login/verify',
       { credential: credToJSON(cred) });
     if (verify.status === 200 && verify.data) {
@@ -402,7 +402,7 @@ $rows
     try {
       cred = await navigator.credentials.create(
         { publicKey: decodeOptions(res.text, true) });
-    } catch (e) { showAuthErr('Passkey ceremony cancelled.'); return; }
+    } catch (e) { showAuthErr('Passkey ceremony failed: ' + (e.name || 'Error') + (e.message ? ' — ' + e.message : '')); return; }
     const verify = await api('POST', '/api/webauthn/register/verify',
       { credential: credToJSON(cred) }, true);
     if (verify.status === 201) {

@@ -57,7 +57,7 @@
 <body>
 <main>
   <h1>⏳ Waiting on Will — the register</h1>
-  <div class="meta"><b>85 open items</b> · oldest first · generated Sun 2026-11-15 22:23 CST
+  <div class="meta"><b>85 open items</b> · oldest first · generated Sun 2026-11-15 22:34 CST
   · source: waiting-on-will.md (register of record) · entries &amp; done-marks queue via the register service; Emise numbers/closes them into the register</div>
   <div id="authbar">
     <span id="auth-out">
@@ -521,7 +521,7 @@
     try {
       cred = await navigator.credentials.get(
         { publicKey: decodeOptions(res.text, false) });
-    } catch (e) { showAuthErr('Passkey ceremony cancelled.'); return; }
+    } catch (e) { showAuthErr('Passkey ceremony failed: ' + (e.name || 'Error') + (e.message ? ' — ' + e.message : '')); return; }
     const verify = await api('POST', '/api/webauthn/login/verify',
       { credential: credToJSON(cred) });
     if (verify.status === 200 && verify.data) {
@@ -547,7 +547,7 @@
     try {
       cred = await navigator.credentials.create(
         { publicKey: decodeOptions(res.text, true) });
-    } catch (e) { showAuthErr('Passkey ceremony cancelled.'); return; }
+    } catch (e) { showAuthErr('Passkey ceremony failed: ' + (e.name || 'Error') + (e.message ? ' — ' + e.message : '')); return; }
     const verify = await api('POST', '/api/webauthn/register/verify',
       { credential: credToJSON(cred) }, true);
     if (verify.status === 201) {
