@@ -1,0 +1,22 @@
+[Unit]
+Description=Register service — register.phext.io /api/ (entries, resolutions, LDAP + passkey auth)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=regsvc
+Group=regsvc
+WorkingDirectory=/opt/register-service
+EnvironmentFile=/etc/register-service/env
+ExecStart=/opt/register-service/venv/bin/python -m regsvc.server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/register-service
+
+[Install]
+WantedBy=multi-user.target

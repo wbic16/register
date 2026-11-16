@@ -130,6 +130,20 @@ PAGE = """<!DOCTYPE html>
   #quick button { padding: 9px 14px; font-size: 14px; border: 1px solid #9998;
        border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
   #qe-note { color: #888; font-size: 12px; }
+  #authbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+       margin-bottom: 10px; }
+  #authbar input { padding: 8px 10px; font-size: 14px;
+       border: 1px solid #9996; border-radius: 8px; }
+  #authbar button, .done-btn, .done-cancel { padding: 7px 12px; font-size: 13px;
+       border: 1px solid #9998; border-radius: 8px; background: transparent;
+       color: inherit; cursor: pointer; }
+  #auth-note { color: #888; font-size: 12px; }
+  #auth-err, #qe-err { color: #c0392b; font-size: 13px; font-weight: 600; }
+  #qe-err { display: none; margin-bottom: 10px; }
+  .done-btn.armed { border-color: #c0392b; color: #c0392b; font-weight: 700; }
+  tr.done-pending td { opacity: .55; text-decoration: line-through; }
+  tr.done-pending td.done-cell { opacity: 1; text-decoration: none; }
+  .done-note { font-size: 12px; color: #888; }
   tr.pending td { background: #4a7dbb14; }
   tr.pending .rm { cursor: pointer; color: #c0392b; font-weight: 700; }
   table { border-collapse: collapse; width: 100%; font-size: 14px; }
@@ -153,13 +167,28 @@ PAGE = """<!DOCTYPE html>
 <main>
   <h1>⏳ Waiting on Will — the register</h1>
   <div class="meta"><b>$count open items</b> · oldest first · generated $generated
-  · source: waiting-on-will.md (register of record) · register read-only, quick-entry drafts are browser-local</div>
+  · source: waiting-on-will.md (register of record) · entries &amp; done-marks queue via the register service; Emise numbers/closes them into the register</div>
+  <div id="authbar">
+    <span id="auth-out">
+      <input id="au-uid" type="text" placeholder="LDAP user (e.g. will)" autocomplete="username">
+      <input id="au-pw" type="password" placeholder="LDAP password" autocomplete="current-password">
+      <button id="au-login" type="button">Log in</button>
+      <button id="au-passkey" type="button">Use a passkey</button>
+      <span id="auth-note">Log in to add to the pile or mark items done.</span>
+    </span>
+    <span id="auth-in" style="display:none">
+      Logged in as <b id="auth-user"></b>
+      <button id="au-enroll" type="button">Add a passkey</button>
+      <button id="au-logout" type="button">Log out</button>
+    </span>
+    <span id="auth-err"></span>
+  </div>
   <div id="quick">
     <input id="qe" type="text" placeholder="Quick entry — type a new wait item, Enter drops it on top of the pile…" autocomplete="off">
     <button id="qe-add" type="button">Add to pile</button>
-    <button id="qe-copy" type="button">Copy pending lines</button>
-    <span id="qe-note">Drafts stay in this browser until Emise numbers them into the register.</span>
+    <span id="qe-note">Entries land in the register service queue (log in first); Emise numbers them into the register.</span>
   </div>
+  <div id="qe-err"></div>
   <input id="q" type="search" placeholder="Filter items… (number, word, tier)" autocomplete="off">
   <table id="grid">
     <thead><tr><th>#</th><th>Item</th><th>Action needed</th><th>Tier</th>
@@ -171,7 +200,7 @@ $rows
   <div id="none">No items match the filter.</div>
   <footer>Register numbers are permanent and monotonic. An item leaves this
   page only when Will acts on it. Regenerate: generate_register_page.py
-  (wbic16/register) → deploy index.html to register.phext.io.</footer>
+  (wbic16/register) → deploy index.html + register-numbers.json to register.phext.io.</footer>
 </main>
 <script>
   const q = document.getElementById('q');
@@ -188,53 +217,359 @@ $rows
   });
   q.focus();
 
-  // Quick entry: drafts land on top of the pile, persist in this browser
-  // (localStorage), and leave only when Emise numbers them into the
-  // register of record. "Copy pending lines" hands them over in one paste.
-  const QE_KEY = 'register-quick-entries';
+  // ---- Register service (v2): auth, quick entry, Done buttons ----
+  // The page is static; all state lives in the service at /api/.
+  // Logged out: read-only grid, exactly as v1. Logged in: quick entry
+  // POSTs to the service queue, and each row grows a Done button whose
+  // mark lands in the service's resolutions log. Emise drains both.
   const tbody = document.querySelector('#grid tbody');
   const qe = document.getElementById('qe');
-  const loadQE = () => { try { return JSON.parse(localStorage.getItem(QE_KEY)) || []; } catch { return []; } };
-  const saveQE = list => localStorage.setItem(QE_KEY, JSON.stringify(list));
-  function renderQE() {
-    tbody.querySelectorAll('tr.pending').forEach(r => r.remove());
-    const list = loadQE();
-    for (let i = list.length - 1; i >= 0; i--) {
-      const tr = document.createElement('tr');
-      tr.className = 'pending';
-      const today = new Date().toISOString().slice(0, 10);
-      tr.innerHTML = '<td class="num">new</td><td class="title"></td>' +
-        '<td class="action">pending — not numbered yet</td><td>draft</td>' +
-        '<td class="since">' + today + '</td>' +
-        '<td class="age"><span class="rm" title="Remove draft">✕</span></td>';
-      tr.querySelector('.title').textContent = list[i];
-      tr.querySelector('.rm').addEventListener('click', () => {
-        const l = loadQE(); l.splice(i, 1); saveQE(l); renderQE();
-      });
-      tbody.prepend(tr);
+  const qeErr = document.getElementById('qe-err');
+  const authErr = document.getElementById('auth-err');
+  let csrfToken = null;
+  let currentUser = null;
+
+  function showErr(msg) { qeErr.textContent = msg; qeErr.style.display = 'block'; }
+  function clearErr() { qeErr.textContent = ''; qeErr.style.display = 'none'; }
+  function showAuthErr(msg) { authErr.textContent = msg; }
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  async function api(method, path, bodyObj, useCsrf) {
+    const opts = { method: method, headers: {}, credentials: 'same-origin' };
+    if (bodyObj !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(bodyObj);
+    }
+    if (useCsrf && csrfToken) opts.headers['X-CSRF-Token'] = csrfToken;
+    let status = 0, data = null, text = '';
+    try {
+      const r = await fetch(path, opts);
+      status = r.status;
+      text = await r.text();
+      try { data = JSON.parse(text); } catch (e) { data = null; }
+    } catch (e) {
+      return { status: 0, data: null, text: '' };
+    }
+    return { status: status, data: data, text: text };
+  }
+
+  // -- base64url helpers for WebAuthn ceremonies --
+  function b64urlToBuf(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const bin = atob(s);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+  function bufToB64url(buf) {
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=/g, '');
+  }
+  function credToJSON(cred) {
+    const resp = {
+      clientDataJSON: bufToB64url(cred.response.clientDataJSON)
+    };
+    if (cred.response.attestationObject)
+      resp.attestationObject = bufToB64url(cred.response.attestationObject);
+    if (cred.response.authenticatorData)
+      resp.authenticatorData = bufToB64url(cred.response.authenticatorData);
+    if (cred.response.signature)
+      resp.signature = bufToB64url(cred.response.signature);
+    resp.userHandle = cred.response.userHandle
+      ? bufToB64url(cred.response.userHandle) : null;
+    if (cred.response.getTransports)
+      resp.transports = cred.response.getTransports();
+    return {
+      id: cred.id,
+      rawId: bufToB64url(cred.rawId),
+      type: cred.type,
+      authenticatorAttachment: cred.authenticatorAttachment || null,
+      clientExtensionResults: cred.getClientExtensionResults
+        ? cred.getClientExtensionResults() : {},
+      response: resp
+    };
+  }
+  function decodeOptions(text, isCreate) {
+    const o = JSON.parse(text);
+    const pub = isCreate ? o : o;
+    pub.challenge = b64urlToBuf(pub.challenge);
+    if (isCreate) {
+      pub.user.id = b64urlToBuf(pub.user.id);
+      if (pub.excludeCredentials)
+        pub.excludeCredentials.forEach(c => { c.id = b64urlToBuf(c.id); });
+    } else if (pub.allowCredentials) {
+      pub.allowCredentials.forEach(c => { c.id = b64urlToBuf(c.id); });
+    }
+    return o;
+  }
+
+  // -- auth state --
+  function renderAuth() {
+    const out = document.getElementById('auth-out');
+    const inn = document.getElementById('auth-in');
+    if (currentUser) {
+      out.style.display = 'none';
+      inn.style.display = '';
+      document.getElementById('auth-user').textContent = currentUser;
+    } else {
+      out.style.display = '';
+      inn.style.display = 'none';
     }
   }
-  function addQE() {
+
+  async function refreshSession() {
+    const res = await api('GET', '/api/session');
+    if (res.status === 200 && res.data && res.data.user) {
+      currentUser = res.data.user;
+      csrfToken = res.data.csrf;
+    } else {
+      currentUser = null;
+      csrfToken = null;
+    }
+    renderAuth();
+    if (currentUser) {
+      injectDoneButtons();
+      loadPending();
+      loadResolutions();
+    }
+  }
+
+  async function doLogin() {
+    showAuthErr('');
+    const uid = document.getElementById('au-uid').value.trim();
+    const pw = document.getElementById('au-pw').value;
+    if (!uid || !pw) { showAuthErr('Enter user and password.'); return; }
+    const res = await api('POST', '/api/login', { uid: uid, password: pw });
+    document.getElementById('au-pw').value = '';
+    if (res.status === 200 && res.data) {
+      currentUser = res.data.user;
+      csrfToken = res.data.csrf;
+      renderAuth();
+      injectDoneButtons();
+      loadPending();
+      loadResolutions();
+    } else if (res.status === 401) {
+      showAuthErr('Invalid credentials.');
+    } else if (res.status === 503) {
+      showAuthErr('Directory unavailable — try again later.');
+    } else {
+      showAuthErr('Login failed (' + res.status + ').');
+    }
+  }
+
+  async function doPasskeyLogin() {
+    showAuthErr('');
+    const uid = document.getElementById('au-uid').value.trim();
+    if (!uid) { showAuthErr('Enter your user name first.'); return; }
+    if (!window.PublicKeyCredential) {
+      showAuthErr('This browser has no passkey support.'); return;
+    }
+    const res = await api('POST', '/api/webauthn/login/options', { uid: uid });
+    if (res.status === 404) { showAuthErr('No passkeys enrolled for that user.'); return; }
+    if (res.status !== 200) { showAuthErr('Passkey login failed to start.'); return; }
+    let cred;
+    try {
+      cred = await navigator.credentials.get(
+        { publicKey: decodeOptions(res.text, false) });
+    } catch (e) { showAuthErr('Passkey ceremony cancelled.'); return; }
+    const verify = await api('POST', '/api/webauthn/login/verify',
+      { credential: credToJSON(cred) });
+    if (verify.status === 200 && verify.data) {
+      currentUser = verify.data.user;
+      csrfToken = verify.data.csrf;
+      renderAuth();
+      injectDoneButtons();
+      loadPending();
+      loadResolutions();
+    } else {
+      showAuthErr('Passkey verification failed.');
+    }
+  }
+
+  async function doEnroll() {
+    showAuthErr('');
+    if (!window.PublicKeyCredential) {
+      showAuthErr('This browser has no passkey support.'); return;
+    }
+    const res = await api('POST', '/api/webauthn/register/options', {}, true);
+    if (res.status !== 200) { showAuthErr('Could not start passkey enrollment.'); return; }
+    let cred;
+    try {
+      cred = await navigator.credentials.create(
+        { publicKey: decodeOptions(res.text, true) });
+    } catch (e) { showAuthErr('Passkey ceremony cancelled.'); return; }
+    const verify = await api('POST', '/api/webauthn/register/verify',
+      { credential: credToJSON(cred) }, true);
+    if (verify.status === 201) {
+      showAuthErr('Passkey added.');
+    } else {
+      showAuthErr('Passkey enrollment failed.');
+    }
+  }
+
+  async function doLogout() {
+    await api('POST', '/api/logout', {}, true);
+    currentUser = null;
+    csrfToken = null;
+    renderAuth();
+    removeDoneButtons();
+    tbody.querySelectorAll('tr.pending').forEach(r => r.remove());
+  }
+
+  document.getElementById('au-login').addEventListener('click', doLogin);
+  document.getElementById('au-pw').addEventListener('keydown',
+    e => { if (e.key === 'Enter') doLogin(); });
+  document.getElementById('au-passkey').addEventListener('click', doPasskeyLogin);
+  document.getElementById('au-enroll').addEventListener('click', doEnroll);
+  document.getElementById('au-logout').addEventListener('click', doLogout);
+
+  // -- quick entry: POSTs to the service queue --
+  async function addQE() {
+    clearErr();
     const text = qe.value.trim();
     if (!text) return;
-    const list = loadQE(); list.push(text); saveQE(list);
-    qe.value = ''; renderQE(); qe.focus();
+    if (!currentUser) { showErr('Log in first — entries go to the service queue now, not this browser.'); return; }
+    const res = await api('POST', '/api/entries', { text: text }, true);
+    if (res.status === 201) {
+      qe.value = '';
+      loadPending();
+      qe.focus();
+    } else if (res.status === 401) {
+      showErr('Session expired — log in again.');
+      refreshSession();
+    } else {
+      showErr('Add failed (' + res.status + ') — the entry was NOT queued. Text kept above.');
+    }
   }
   document.getElementById('qe-add').addEventListener('click', addQE);
   qe.addEventListener('keydown', e => { if (e.key === 'Enter') addQE(); });
-  document.getElementById('qe-copy').addEventListener('click', async () => {
-    const list = loadQE();
-    if (!list.length) return;
-    const lines = list.map(t => '- Quick entry (unnumbered): ' + t).join('\n');
-    try { await navigator.clipboard.writeText(lines); } catch { qe.value = lines; qe.select(); }
-  });
-  renderQE();
+
+  async function loadPending() {
+    const res = await api('GET', '/api/entries/pending');
+    if (res.status !== 200 || !res.data) return;
+    tbody.querySelectorAll('tr.pending').forEach(r => r.remove());
+    const atoms = res.data.atoms.slice().sort((a, b) => a.seq - b.seq);
+    for (const a of atoms) {
+      const tr = document.createElement('tr');
+      tr.className = 'pending';
+      const day = new Date(a.ts * 1000).toISOString().slice(0, 10);
+      tr.innerHTML = '<td class="num">new</td><td class="title"></td>' +
+        '<td class="action">pending — awaiting Emise’s numbering</td>' +
+        '<td>queue</td><td class="since">' + day + '</td>' +
+        '<td class="age">' + esc(a.user || '') + '</td>';
+      tr.querySelector('.title').textContent = a.text;
+      tbody.prepend(tr);
+    }
+  }
+
+  // -- Done buttons (authenticated only; injected, never in static HTML) --
+  function injectDoneButtons() {
+    if (document.getElementById('done-th')) return;
+    const headRow = document.querySelector('#grid thead tr');
+    const th = document.createElement('th');
+    th.id = 'done-th';
+    th.textContent = 'Done?';
+    headRow.appendChild(th);
+    document.querySelectorAll('#grid tbody tr[data-n]').forEach(tr => {
+      const td = document.createElement('td');
+      td.className = 'done-cell';
+      const n = tr.getAttribute('data-n');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'done-btn';
+      btn.textContent = 'Done';
+      btn.addEventListener('click', () => onDoneClick(tr, td, btn, n));
+      td.appendChild(btn);
+      tr.appendChild(td);
+    });
+  }
+
+  function removeDoneButtons() {
+    const th = document.getElementById('done-th');
+    if (th) th.remove();
+    document.querySelectorAll('#grid tbody td.done-cell').forEach(td => td.remove());
+    document.querySelectorAll('#grid tbody tr.done-pending')
+      .forEach(tr => tr.classList.remove('done-pending'));
+  }
+
+  function onDoneClick(tr, td, btn, n) {
+    if (!btn.dataset.armed) {
+      // First click arms an inline confirm; a stray misclick queues nothing.
+      btn.dataset.armed = '1';
+      btn.textContent = 'Confirm done?';
+      btn.classList.add('armed');
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'done-cancel';
+      cancel.textContent = '✕';
+      td.appendChild(cancel);
+      const disarm = () => {
+        delete btn.dataset.armed;
+        btn.textContent = 'Done';
+        btn.classList.remove('armed');
+        cancel.remove();
+      };
+      btn._disarm = disarm;
+      btn._timer = setTimeout(disarm, 6000);
+      cancel.addEventListener('click', () => {
+        clearTimeout(btn._timer);
+        disarm();
+      });
+      return;
+    }
+    clearTimeout(btn._timer);
+    if (btn._disarm) btn._disarm();
+    btn.disabled = true;
+    btn.textContent = '…';
+    // Optimistic: mark the row now; revert loudly if the POST fails.
+    tr.classList.add('done-pending');
+    api('POST', '/api/items/' + n + '/done', {}, true).then(res => {
+      if (res.status === 201) {
+        td.innerHTML = '<span class="done-note">done — pending Emise’s closure pass</span>';
+      } else {
+        tr.classList.remove('done-pending');
+        td.innerHTML = '';
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'done-btn';
+        retry.textContent = 'Done';
+        retry.addEventListener('click', () => onDoneClick(tr, td, retry, n));
+        td.appendChild(retry);
+        showErr('Marking #' + n + ' done failed (' + res.status + ') — NOT queued.');
+        if (res.status === 401) refreshSession();
+      }
+    });
+  }
+
+  async function loadResolutions() {
+    // Reflect marks already queued (e.g. from another device) so a row
+    // Will already marked does not invite a second click.
+    const res = await api('GET', '/api/resolutions');
+    if (res.status !== 200 || !res.data) return;
+    const doneNums = {};
+    res.data.atoms.forEach(a => { doneNums[a.register_number] = true; });
+    document.querySelectorAll('#grid tbody tr[data-n]').forEach(tr => {
+      const n = tr.getAttribute('data-n');
+      if (!doneNums[n]) return;
+      tr.classList.add('done-pending');
+      const td = tr.querySelector('td.done-cell');
+      if (td) td.innerHTML =
+        '<span class="done-note">done — pending Emise’s closure pass</span>';
+    });
+  }
+
+  refreshSession();
 </script>
 </body>
 </html>
 """
 
-ROW = """      <tr><td class="num">{n}</td><td class="title">{title}</td>
+ROW = """      <tr data-n="{n}"><td class="num">{n}</td><td class="title">{title}</td>
       <td class="action">{action}</td><td>{tier}</td>
       <td class="since">{since}</td><td class="age {age_class}">{age}</td></tr>"""
 
@@ -299,9 +634,15 @@ def main():
     page = Template(PAGE).substitute(count=len(items), generated=generated,
                                      rows="\n".join(rows))
     Path(args.out).write_text(page, encoding="utf-8")
+    numbers_path = Path(args.out).with_name("register-numbers.json")
+    numbers_path.write_text(
+        json.dumps(sorted(it["n"] for it in items)) + "\n",
+        encoding="utf-8")
     print(f"wrote {args.out}: {len(items)} items "
           f"(header count {header_count}, mirror {len(mirror)}), "
           f"generated {generated}")
+    print(f"wrote {numbers_path}: open register numbers for the "
+          f"register service's Done validation")
 
 
 if __name__ == "__main__":
