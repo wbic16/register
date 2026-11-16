@@ -3,9 +3,12 @@
 Transport-independent core: ``RegisterApp.handle(method, path, headers,
 body) -> (status, headers, body)``; server.py adapts it to
 http.server. All state-changing endpoints require a session; all auth
-failures fail closed. The service NEVER writes the register of record —
-it only appends atoms to its own logs (entries, resolutions), which
-Emise's ticks drain.
+failures fail closed. All register data is scoped by the caller's
+login: queue reads return only the caller's atoms (the drain token
+reads only its configured user's), and an item can be closed only by
+the login that owns its register number. The service NEVER writes the
+register of record — it only appends atoms to its own logs (entries,
+resolutions), which Emise's ticks drain.
 """
 
 import hashlib
@@ -45,7 +48,8 @@ class RegisterApp:
     def __init__(self, *, entries_log, resolutions_log, credentials,
                  sessions, ldap_auth, ceremonies, secret,
                  numbers_file=None, session_ttl=7 * 24 * 3600,
-                 preauth_ttl=300, drain_token=None):
+                 preauth_ttl=300, drain_token=None, drain_user=None,
+                 numbers_owner=None):
         self.entries = entries_log
         self.resolutions = resolutions_log
         self.credentials = credentials
@@ -54,6 +58,16 @@ class RegisterApp:
         self.ceremonies = ceremonies
         self.secret = secret
         self.drain_token = drain_token
+        # Per-user scoping: every queue read/write happens inside one
+        # login's scope. A session's scope is its own uid. The drain
+        # token has no session, so its scope is the configured
+        # drain_user — the login on whose behalf drains run. With no
+        # drain_user configured the token authorizes nothing.
+        self.drain_user = drain_user
+        # Owner assigned to register numbers listed in the legacy
+        # flat-list numbers file (a bare [n, ...] carries no owner;
+        # the object form {"n": uid} names each number's owner).
+        self.numbers_owner = numbers_owner
         self.numbers_file = Path(numbers_file) if numbers_file else None
         self.session_ttl = session_ttl
         self.preauth_ttl = preauth_ttl
@@ -128,7 +142,15 @@ class RegisterApp:
 
     # -- register numbers (for Done validation) ------------------------
     def _known_numbers(self):
-        """Set of open register numbers, or None if unavailable."""
+        """Map of open register number -> owning uid, or None if the
+        numbers file is unavailable.
+
+        Two file shapes are accepted: the scoped object form
+        ``{"167": "wbic16", ...}`` (each number names its owner), and
+        the legacy flat list ``[167, ...]`` whose numbers all belong
+        to the configured ``numbers_owner`` (None = owned by nobody,
+        so nothing can be closed against them — fail closed).
+        """
         if self.numbers_file is None:
             return None
         try:
@@ -136,7 +158,16 @@ class RegisterApp:
             if self._numbers_cache is None or mtime != self._numbers_mtime:
                 data = json.loads(
                     self.numbers_file.read_text(encoding="utf-8"))
-                self._numbers_cache = {int(n) for n in data}
+                if isinstance(data, dict):
+                    owners = {}
+                    for k, v in data.items():
+                        owners[int(k)] = v if isinstance(v, str) else None
+                    self._numbers_cache = owners
+                elif isinstance(data, list):
+                    self._numbers_cache = {
+                        int(n): self.numbers_owner for n in data}
+                else:
+                    return None
                 self._numbers_mtime = mtime
             return self._numbers_cache
         except Exception:
@@ -258,15 +289,23 @@ class RegisterApp:
         return bool(token) and hmac.compare_digest(token, self.drain_token)
 
     def _list_log(self, headers, log, params):
-        if not self._drain_authorized(headers):
+        """Queue reads are scoped to one login: a session sees only
+        its own atoms; the drain token sees only the configured
+        drain_user's atoms (per-user drain)."""
+        if self._drain_authorized(headers):
+            if not self.drain_user:
+                return _err(401, "drain token is not scoped to a user")
+            scope = self.drain_user
+        else:
             _, rec, err = self._require_session(headers)
             if err:
                 return err
+            scope = rec["uid"]
         try:
             after = int(params.get("after_seq", "0"))
         except ValueError:
             return _err(400, "after_seq must be an integer")
-        atoms = log.read_all(after_seq=after)
+        atoms = log.read_all(after_seq=after, user=scope)
         return _json(200, {"atoms": atoms, "last_seq": log.last_seq})
 
     def _close_item(self, headers, body, number, outcome):
@@ -297,7 +336,10 @@ class RegisterApp:
         known = self._known_numbers()
         if known is None:
             return _err(503, "register numbers unavailable")
-        if number not in known:
+        # Per-user scoping: a number can be closed only by its owner.
+        # Unknown, unowned, and other-owned numbers are
+        # indistinguishable — all 404, no existence leak.
+        if known.get(number) != rec["uid"]:
             return _err(404, "unknown register number")
         fields = {"type": "resolution", "register_number": number,
                   "user": rec["uid"], "outcome": outcome}

@@ -32,6 +32,14 @@ from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("America/Chicago")
 
+# Per-user scoping (2026-11-16): the register service scopes every
+# item by its owner's login, and register-numbers.json names each
+# open number's owner in the object form {"167": "wbic16", ...}.
+# This register is Will's, so every number is owned by his login.
+# (The service still accepts the legacy flat list [167, ...] under a
+# configured owner, but new emissions use the scoped form.)
+REGISTER_OWNER_UID = "wbic16"
+
 ITEM_START = re.compile(r"^(\d+)\.\s+\*\*", re.M)
 SINCE_MARKER_RE = re.compile(r"\*Since\s+(\d{4}-\d{2}-\d{2})")
 SINCE_RE = re.compile(r"[Ss]ince\s+(\d{4}-\d{2}-\d{2})")
@@ -733,7 +741,8 @@ def main():
     Path(args.out).write_text(page, encoding="utf-8")
     numbers_path = Path(args.out).with_name("register-numbers.json")
     numbers_path.write_text(
-        json.dumps(sorted(it["n"] for it in items)) + "\n",
+        json.dumps({str(it["n"]): REGISTER_OWNER_UID for it in
+                    sorted(items, key=lambda x: x["n"])}) + "\n",
         encoding="utf-8")
     print(f"wrote {args.out}: {len(items)} items "
           f"(header count {header_count}, mirror {len(mirror)}), "

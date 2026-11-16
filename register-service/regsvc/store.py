@@ -56,8 +56,15 @@ class JsonlLog:
                 os.fsync(f.fileno())
             return stored
 
-    def read_all(self, after_seq=0):
-        """All atoms with seq > after_seq, in order."""
+    def read_all(self, after_seq=0, user=None):
+        """All atoms with seq > after_seq, in order.
+
+        When ``user`` is given, only atoms owned by that login are
+        returned (per-user scoping: an atom belongs to the uid stamped
+        in its ``user`` field at append time; atoms with no ``user``
+        field belong to nobody and match no scope — they become
+        visible only after the scope migration assigns them an owner).
+        """
         out = []
         if not self.path.exists():
             return out
@@ -67,8 +74,11 @@ class JsonlLog:
                 if not line:
                     continue
                 atom = json.loads(line)
-                if atom.get("seq", 0) > after_seq:
-                    out.append(atom)
+                if atom.get("seq", 0) <= after_seq:
+                    continue
+                if user is not None and atom.get("user") != user:
+                    continue
+                out.append(atom)
         return out
 
     @property

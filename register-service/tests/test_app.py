@@ -80,10 +80,14 @@ class Client:
 
 
 def make_app(tmp, numbers=(9, 10, 21), ldap=None, ceremonies=None,
-             numbers_file=True):
+             numbers_file=True, numbers_map=None, numbers_owner="will",
+             drain_user=None, drain_token=None):
     numbers_path = Path(tmp) / "register-numbers.json"
     if numbers_file:
-        numbers_path.write_text(json.dumps(list(numbers)))
+        if numbers_map is not None:
+            numbers_path.write_text(json.dumps(numbers_map))
+        else:
+            numbers_path.write_text(json.dumps(list(numbers)))
     return RegisterApp(
         entries_log=JsonlLog(Path(tmp) / "pending-entries.jsonl"),
         resolutions_log=JsonlLog(Path(tmp) / "resolutions.jsonl"),
@@ -93,6 +97,9 @@ def make_app(tmp, numbers=(9, 10, 21), ldap=None, ceremonies=None,
         ceremonies=ceremonies or FakeCeremonies(),
         secret=SECRET,
         numbers_file=numbers_path,
+        numbers_owner=numbers_owner,
+        drain_user=drain_user,
+        drain_token=drain_token,
     )
 
 
@@ -463,6 +470,7 @@ class TestDrainToken(unittest.TestCase):
             secret=SECRET,
             numbers_file=None,
             drain_token="drain-secret-token",
+            drain_user="will",
         )
         self.app.entries.append({"type": "entry", "text": "queued",
                                  "user": "will"})
@@ -490,6 +498,144 @@ class TestDrainToken(unittest.TestCase):
         status, _ = self.call("POST", "/api/entries", h,
                               {"text": "forged"})
         self.assertEqual(status, 401)
+
+    def test_drain_token_without_drain_user_401(self):
+        # A drain token with no configured user scope authorizes
+        # nothing (fail closed) — the token is per-user now.
+        app = RegisterApp(
+            entries_log=JsonlLog(Path(self.tmp) / "e2.jsonl"),
+            resolutions_log=JsonlLog(Path(self.tmp) / "r2.jsonl"),
+            credentials=CredentialStore(Path(self.tmp) / "c2.json"),
+            sessions=SessionStore(Path(self.tmp) / "s2.json"),
+            ldap_auth=FakeLdap({"will": "hunter2"}),
+            ceremonies=FakeCeremonies(),
+            secret=SECRET,
+            numbers_file=None,
+            drain_token="drain-secret-token",
+        )
+        app.entries.append({"type": "entry", "text": "queued",
+                            "user": "will"})
+        status, _, _ = app.handle(
+            "GET", "/api/entries/pending",
+            {"X-Drain-Token": "drain-secret-token"}, b"")
+        self.assertEqual(status, 401)
+
+
+class TestScoping(unittest.TestCase):
+    """Per-user scoping: two logins, disjoint data. Alice must never
+    see, drain, resolve, or cancel anything of Will's, and vice
+    versa."""
+
+    NUMBERS = {"9": "will", "10": "alice", "21": "will"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        ldap = FakeLdap({"will": "hunter2", "alice": "wonderland"})
+        self.app = make_app(self.tmp, ldap=ldap,
+                            numbers_map=self.NUMBERS,
+                            drain_user="will",
+                            drain_token="drain-secret-token")
+        self.will = Client(self.app)
+        self.alice = Client(self.app)
+        self.csrf = {}
+        for client, uid, pw in ((self.will, "will", "hunter2"),
+                                (self.alice, "alice", "wonderland")):
+            status, body, _ = client.call(
+                "POST", "/api/login", {"uid": uid, "password": pw})
+            assert status == 200, body
+            self.csrf[uid] = body["csrf"]
+
+    def drain(self, path):
+        status, _, resp = self.app.handle(
+            "GET", path, {"X-Drain-Token": "drain-secret-token"}, b"")
+        assert status == 200, resp
+        return json.loads(resp.decode())
+
+    def test_entries_isolated_between_users(self):
+        self.will.call("POST", "/api/entries", {"text": "will wait"},
+                       csrf=self.csrf["will"])
+        self.alice.call("POST", "/api/entries", {"text": "alice wait"},
+                        csrf=self.csrf["alice"])
+        _, body, _ = self.will.call("GET", "/api/entries/pending")
+        self.assertEqual([a["text"] for a in body["atoms"]],
+                         ["will wait"])
+        _, body, _ = self.alice.call("GET", "/api/entries/pending")
+        self.assertEqual([a["text"] for a in body["atoms"]],
+                         ["alice wait"])
+
+    def test_resolutions_isolated_between_users(self):
+        status, _, _ = self.will.call("POST", "/api/items/9/done", {},
+                                      csrf=self.csrf["will"])
+        self.assertEqual(status, 201)
+        _, body, _ = self.alice.call("GET", "/api/resolutions")
+        self.assertEqual(body["atoms"], [])
+        _, body, _ = self.will.call("GET", "/api/resolutions")
+        self.assertEqual(len(body["atoms"]), 1)
+
+    def test_cannot_close_another_users_item(self):
+        # Alice closing Will's #9 or #21: 404, indistinguishable from
+        # an unknown number, and no atom is recorded.
+        for n in (9, 21):
+            status, _, _ = self.alice.call(
+                "POST", f"/api/items/{n}/done", {},
+                csrf=self.csrf["alice"])
+            self.assertEqual(status, 404)
+            status, _, _ = self.alice.call(
+                "POST", f"/api/items/{n}/cancel", {},
+                csrf=self.csrf["alice"])
+            self.assertEqual(status, 404)
+        # Will closing Alice's #10: same.
+        status, _, _ = self.will.call("POST", "/api/items/10/done", {},
+                                      csrf=self.csrf["will"])
+        self.assertEqual(status, 404)
+        _, body, _ = self.will.call("GET", "/api/resolutions")
+        self.assertEqual(body["atoms"], [])
+        # Each owner CAN close their own.
+        status, _, _ = self.alice.call("POST", "/api/items/10/cancel",
+                                       {}, csrf=self.csrf["alice"])
+        self.assertEqual(status, 201)
+        status, _, _ = self.will.call("POST", "/api/items/21/done", {},
+                                      csrf=self.csrf["will"])
+        self.assertEqual(status, 201)
+
+    def test_drain_returns_only_drain_users_scope(self):
+        self.will.call("POST", "/api/entries", {"text": "will wait"},
+                       csrf=self.csrf["will"])
+        self.alice.call("POST", "/api/entries", {"text": "alice wait"},
+                        csrf=self.csrf["alice"])
+        self.alice.call("POST", "/api/items/10/done", {},
+                        csrf=self.csrf["alice"])
+        body = self.drain("/api/entries/pending")
+        self.assertEqual([a["text"] for a in body["atoms"]],
+                         ["will wait"])
+        body = self.drain("/api/resolutions")
+        self.assertEqual(body["atoms"], [])  # Alice's atom stays hers
+
+    def test_flat_list_numbers_belong_to_configured_owner(self):
+        # Legacy flat list + numbers_owner: the owner can close,
+        # anyone else gets 404.
+        tmp = tempfile.mkdtemp()
+        ldap = FakeLdap({"will": "hunter2", "alice": "wonderland"})
+        app = make_app(tmp, ldap=ldap, numbers=(9,),
+                       numbers_owner="will")
+        alice = Client(app)
+        status, body, _ = alice.call(
+            "POST", "/api/login",
+            {"uid": "alice", "password": "wonderland"})
+        status, _, _ = alice.call("POST", "/api/items/9/done", {},
+                                  csrf=body["csrf"])
+        self.assertEqual(status, 404)
+
+    def test_unowned_numbers_cannot_be_closed(self):
+        # Flat list with NO configured owner: fail closed for all.
+        tmp = tempfile.mkdtemp()
+        app = make_app(tmp, numbers=(9,), numbers_owner=None)
+        client = Client(app)
+        status, body, _ = client.call(
+            "POST", "/api/login", {"uid": "will", "password": "hunter2"})
+        status, _, _ = client.call("POST", "/api/items/9/done", {},
+                                   csrf=body["csrf"])
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":
