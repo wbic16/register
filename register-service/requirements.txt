@@ -1,0 +1,10 @@
+cbor2==6.3.0
+cffi==2.1.1
+cryptography==50.0.2
+ldap3==2.9.1
+pyasn1==0.6.5
+pyasn1_modules==0.4.2
+pycparser==3.12
+pyOpenSSL==26.4.0
+typing_extensions==4.16.0
+webauthn==3.0.1
