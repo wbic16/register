@@ -70,6 +70,18 @@ class TestAuthenticate(unittest.TestCase):
             "will", "wrong")
         self.assertIsNone(result)
 
+    def test_invalid_credentials_result_returns_none(self):
+        # Regression (live on awsbox 2026-11-15): with raise_exceptions,
+        # a refused bind raises LDAPInvalidCredentialsResult (result 49),
+        # which must read as "bad credentials", not "directory down" —
+        # the first install run's selftest failed on exactly this.
+        exc = ldap3.core.exceptions.LDAPInvalidCredentialsResult(
+            result=49, description="invalidCredentials", dn="",
+            message="", response_type=None, response=None)
+        result = self.auth(factory_raising(exc)).authenticate(
+            "will", "wrong")
+        self.assertIsNone(result)
+
     def test_unreachable_raises_unavailable(self):
         exc = ldap3.core.exceptions.LDAPSocketOpenError("cannot connect")
         with self.assertRaises(LdapUnavailable):

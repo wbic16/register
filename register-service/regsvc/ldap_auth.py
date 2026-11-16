@@ -80,6 +80,11 @@ class LdapAuthenticator:
 
         try:
             conn = self._factory(self._server(), dn, password)
+        except ldap3.core.exceptions.LDAPInvalidCredentialsResult:
+            # raise_exceptions=True surfaces a refused bind (result 49)
+            # as this exception, not as LDAPBindError. A refusal is a
+            # normal "bad credentials" outcome, not an outage.
+            return None
         except ldap3.core.exceptions.LDAPBindError:
             return None
         except Exception as exc:  # socket, TLS, timeout, protocol...
