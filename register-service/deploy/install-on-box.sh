@@ -75,6 +75,14 @@ else
   echo "drain token already present — kept"
 fi
 
+echo "== qexo service token (generated once, appended to env) =="
+if ! grep -q '^REGSVC_QEXO_TOKEN=' "$CONFDIR/env"; then
+  echo "REGSVC_QEXO_TOKEN=$(openssl rand -hex 24)" | sudo tee -a "$CONFDIR/env" >/dev/null
+  echo "qexo token generated (in $CONFDIR/env — qexo writes back resolutions and appends entries with it, spec §10.4)"
+else
+  echo "qexo token already present — kept"
+fi
+
 echo "== python venv + deps =="
 if [ ! -x "$APP/venv/bin/python" ]; then
   if ! sudo python3 -m venv "$APP/venv" 2>/dev/null || \
