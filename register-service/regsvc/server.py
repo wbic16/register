@@ -16,6 +16,12 @@ Config via environment:
   REGSVC_DRAIN_TOKEN  optional; when set, header X-Drain-Token with
                       this value may read (only) the two queue logs —
                       Emise's ticks drain headlessly with it
+  REGSVC_QEXO_TOKEN   optional; when set, header X-Qexo-Token with
+                      this value may append entries and record
+                      resolutions (POST /api/entries,
+                      /api/items/{n}/done|cancel) as user "qexo" —
+                      qexo's write-back credential (spec §10.4, Q2
+                      scope). Unset means the legs fail closed.
 
 Modes:
   (default)   serve
@@ -63,6 +69,7 @@ def build_app(env=None):
         ceremonies=ceremonies,
         secret=secret,
         drain_token=env.get("REGSVC_DRAIN_TOKEN") or None,
+        qexo_token=env.get("REGSVC_QEXO_TOKEN") or None,
         numbers_file=env.get(
             "REGSVC_NUMBERS_FILE",
             "/sites/web/register.phext.io/register-numbers.json"),
