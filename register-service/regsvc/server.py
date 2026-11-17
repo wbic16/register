@@ -22,6 +22,12 @@ Config via environment:
   REGSVC_NUMBERS_OWNER  owner uid for register numbers in a legacy
                       flat-list numbers file (the scoped object form
                       names each number's owner in the file itself)
+  REGSVC_QEXO_TOKEN   optional; when set, header X-Qexo-Token with
+                      this value may append entries and record
+                      resolutions (POST /api/entries,
+                      /api/items/{n}/done|cancel) as user "qexo" —
+                      qexo's write-back credential (spec §10.4, Q2
+                      scope). Unset means the legs fail closed.
 
 Modes:
   (default)   serve
@@ -71,6 +77,7 @@ def build_app(env=None):
         drain_token=env.get("REGSVC_DRAIN_TOKEN") or None,
         drain_user=env.get("REGSVC_DRAIN_USER") or None,
         numbers_owner=env.get("REGSVC_NUMBERS_OWNER") or None,
+        qexo_token=env.get("REGSVC_QEXO_TOKEN") or None,
         numbers_file=env.get(
             "REGSVC_NUMBERS_FILE",
             "/sites/web/register.phext.io/register-numbers.json"),
