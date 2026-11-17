@@ -56,7 +56,11 @@ def make_app(tmp, numbers=(9, 10, 21), qexo_token=QEXO,
              drain_token=DRAIN, numbers_file=True):
     numbers_path = Path(tmp) / "register-numbers.json"
     if numbers_file:
-        numbers_path.write_text(json.dumps(list(numbers)))
+        # Scoped object form (per-user scoping): every number
+        # belongs to the session user "will" — who is also this
+        # fixture's drain scope and the qexo token's scope owner.
+        numbers_path.write_text(json.dumps(
+            {str(n): "will" for n in numbers}))
     return RegisterApp(
         entries_log=JsonlLog(Path(tmp) / "pending-entries.jsonl"),
         resolutions_log=JsonlLog(Path(tmp) / "resolutions.jsonl"),
@@ -67,7 +71,9 @@ def make_app(tmp, numbers=(9, 10, 21), qexo_token=QEXO,
         secret=SECRET,
         numbers_file=numbers_path,
         drain_token=drain_token,
+        drain_user="will",
         qexo_token=qexo_token,
+        qexo_user="will",
     )
 
 

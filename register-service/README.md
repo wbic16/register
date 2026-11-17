@@ -37,7 +37,11 @@ identity (`qexo`). Number validation and note limits are the session
 path's, unchanged. The token authorizes nothing else — no reads, no
 login, no session powers — it is bound to this register's scope and
 is not widenable by configuration, and when the env value is unset
-the legs fail closed.
+the legs fail closed. Under per-user scoping its closes answer to
+the ownership rule as the scope's owner (`REGSVC_QEXO_USER`): a
+number closes under the token exactly when it belongs to that login,
+reads scoped to that login include the token's atoms, and with no
+scope owner configured the token closes nothing.
 
 ## Layout
 

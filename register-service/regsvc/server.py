@@ -28,6 +28,12 @@ Config via environment:
                       /api/items/{n}/done|cancel) as user "qexo" —
                       qexo's write-back credential (spec §10.4, Q2
                       scope). Unset means the legs fail closed.
+  REGSVC_QEXO_USER    the login that owns the register scope the
+                      qexo token serves: its closes are checked
+                      against this owner (the same ownership rule a
+                      session answers to), and reads scoped to this
+                      login include the token's atoms. Without it
+                      the token authorizes no closes.
 
 Modes:
   (default)   serve
@@ -42,6 +48,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .app import RegisterApp
+
+
+def _service_log(message):
+    print(f"register-service: {message}", file=sys.stderr, flush=True)
 from .ldap_auth import LdapAuthenticator, LdapUnavailable
 from .store import CredentialStore, JsonlLog, SessionStore
 from .webauthn_auth import WebAuthnCeremonies
@@ -78,6 +88,8 @@ def build_app(env=None):
         drain_user=env.get("REGSVC_DRAIN_USER") or None,
         numbers_owner=env.get("REGSVC_NUMBERS_OWNER") or None,
         qexo_token=env.get("REGSVC_QEXO_TOKEN") or None,
+        qexo_user=env.get("REGSVC_QEXO_USER") or None,
+        logger=_service_log,
         numbers_file=env.get(
             "REGSVC_NUMBERS_FILE",
             "/sites/web/register.phext.io/register-numbers.json"),

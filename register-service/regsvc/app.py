@@ -57,7 +57,8 @@ class RegisterApp:
                  sessions, ldap_auth, ceremonies, secret,
                  numbers_file=None, session_ttl=7 * 24 * 3600,
                  preauth_ttl=300, drain_token=None, drain_user=None,
-                 numbers_owner=None, qexo_token=None):
+                 numbers_owner=None, qexo_token=None, qexo_user=None,
+                 logger=None):
         self.entries = entries_log
         self.resolutions = resolutions_log
         self.credentials = credentials
@@ -77,12 +78,32 @@ class RegisterApp:
         # the object form {"n": uid} names each number's owner).
         self.numbers_owner = numbers_owner
         self.qexo_token = qexo_token
+        # The qexo token's scope owner: the login that owns the
+        # register scope the token serves. The token's closes answer
+        # to the same ownership rule as a session's — a number can be
+        # closed only by its owner — evaluated against this login,
+        # not against the token's recorded identity ("qexo" owns no
+        # numbers). Its atoms still record "qexo" as their user, and
+        # reads scoped to this login include those atoms: the token
+        # acts for its scope owner, so its writes live in that scope.
+        # With no qexo_user configured the token authorizes no
+        # closes (fail closed, like the drain token).
+        self.qexo_user = qexo_user
+        # Optional service-log sink (a callable taking one string).
+        # The core stays transport-independent; server.py wires it
+        # to stderr. Used where a refusal's cause must be visible to
+        # the operator without leaking to the caller.
+        self._logger = logger
         self.numbers_file = Path(numbers_file) if numbers_file else None
         self.session_ttl = session_ttl
         self.preauth_ttl = preauth_ttl
         self._preauth = {}  # token -> {uid, challenge(b64url), expires}
         self._numbers_cache = None
         self._numbers_mtime = None
+
+    def _log(self, message):
+        if self._logger is not None:
+            self._logger(message)
 
     # -- signing / cookies --------------------------------------------
     def _sign(self, value):
@@ -337,7 +358,16 @@ class RegisterApp:
             after = int(params.get("after_seq", "0"))
         except ValueError:
             return _err(400, "after_seq must be an integer")
-        atoms = log.read_all(after_seq=after, user=scope)
+        # A scope's atoms include the ones its service token wrote:
+        # the qexo token acts for its configured scope owner, so
+        # atoms recording user "qexo" belong to that owner's scope —
+        # and to no other scope.
+        visible = [scope]
+        if self.qexo_user is not None and self.qexo_user == scope:
+            visible.append("qexo")
+        atoms = [a for user in visible
+                 for a in log.read_all(after_seq=after, user=user)]
+        atoms.sort(key=lambda a: a["seq"])
         return _json(200, {"atoms": atoms, "last_seq": log.last_seq})
 
     def _close_item(self, headers, body, number, outcome):
@@ -346,9 +376,17 @@ class RegisterApp:
         note contracts; only the recorded outcome differs. The
         qexo service token is the second authorized writer
         (§10.4): same number and note contracts, no session, and
-        the atom records the token's identity as its user."""
+        the atom records the token's identity as its user. The
+        ownership check below evaluates a session against its own
+        uid and the token against its configured scope owner —
+        one rule, two callers."""
         if self._qexo_authorized(headers):
             uid = "qexo"
+            # The token answers to the ownership rule as its scope
+            # owner: the login that owns the register scope it
+            # serves. Its recorded identity owns no numbers and is
+            # never the thing checked.
+            scope = self.qexo_user
         else:
             _, rec, err = self._require_session(headers)
             if err:
@@ -357,6 +395,7 @@ class RegisterApp:
             if err:
                 return err
             uid = rec["uid"]
+            scope = rec["uid"]
         # Optional close rationale: {"note": "..."} captured by the
         # page's close dialog. No body (or an empty object) is exactly
         # the pre-dialog behavior — a bare resolution atom.
@@ -377,8 +416,20 @@ class RegisterApp:
             return _err(503, "register numbers unavailable")
         # Per-user scoping: a number can be closed only by its owner.
         # Unknown, unowned, and other-owned numbers are
-        # indistinguishable — all 404, no existence leak.
-        if known.get(number) != rec["uid"]:
+        # indistinguishable to the caller — all 404, no existence
+        # leak. The service log keeps the causes apart for the
+        # operator: an unknown number is a client error, a known
+        # number outside the caller's scope is a scope or
+        # configuration problem, and confusing the two in diagnosis
+        # is how a scoping bug masquerades as a credential failure.
+        if number not in known:
+            self._log(f"close refused: register number {number} "
+                      f"unknown (caller {uid})")
+            return _err(404, "unknown register number")
+        if known[number] != scope:
+            self._log(f"close refused: register number {number} "
+                      f"owned by {known[number]!r}, caller scope "
+                      f"{scope!r} (caller {uid})")
             return _err(404, "unknown register number")
         fields = {"type": "resolution", "register_number": number,
                   "user": uid, "outcome": outcome}
