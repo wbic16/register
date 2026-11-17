@@ -6,6 +6,14 @@ http.server. All state-changing endpoints require a session; all auth
 failures fail closed. The service NEVER writes the register of record —
 it only appends atoms to its own logs (entries, resolutions), which
 Emise's ticks drain.
+
+Two headless credentials stand beside the session, each fail-closed
+and each authorizing exactly its own legs (qexo dispatch-core spec
+§10.4): the drain token (X-Drain-Token) reads the two queue logs and
+nothing else; the qexo service token (X-Qexo-Token) appends entries
+and records resolutions — the ratified Q2 scope, bound to this
+register (Will's scope) — and nothing else. Atoms written under the
+qexo token record ``user`` as the token's identity, ``qexo``.
 """
 
 import hashlib
@@ -45,7 +53,7 @@ class RegisterApp:
     def __init__(self, *, entries_log, resolutions_log, credentials,
                  sessions, ldap_auth, ceremonies, secret,
                  numbers_file=None, session_ttl=7 * 24 * 3600,
-                 preauth_ttl=300, drain_token=None):
+                 preauth_ttl=300, drain_token=None, qexo_token=None):
         self.entries = entries_log
         self.resolutions = resolutions_log
         self.credentials = credentials
@@ -54,6 +62,7 @@ class RegisterApp:
         self.ceremonies = ceremonies
         self.secret = secret
         self.drain_token = drain_token
+        self.qexo_token = qexo_token
         self.numbers_file = Path(numbers_file) if numbers_file else None
         self.session_ttl = session_ttl
         self.preauth_ttl = preauth_ttl
@@ -229,12 +238,21 @@ class RegisterApp:
 
     # -- entries & resolutions ---------------------------------------------
     def _add_entry(self, headers, body):
-        _, rec, err = self._require_session(headers)
-        if err:
-            return err
-        err = self._require_csrf(headers, rec)
-        if err:
-            return err
+        # The qexo service token may also append (ratified
+        # Q2 scope): items born on the phone appear in the
+        # register web view. The atom records the token's
+        # identity as its user — a body claiming another
+        # user is ignored, never trusted.
+        if self._qexo_authorized(headers):
+            uid = "qexo"
+        else:
+            _, rec, err = self._require_session(headers)
+            if err:
+                return err
+            err = self._require_csrf(headers, rec)
+            if err:
+                return err
+            uid = rec["uid"]
         data = self._body_json(body)
         if data is None:
             return _err(400, "bad JSON")
@@ -244,7 +262,7 @@ class RegisterApp:
         if len(text) > MAX_ENTRY_CHARS:
             return _err(400, "text too long")
         atom = self.entries.append(
-            {"type": "entry", "text": text, "user": rec["uid"]})
+            {"type": "entry", "text": text, "user": uid})
         return _json(201, {"ok": True, "seq": atom["seq"]})
 
     def _drain_authorized(self, headers):
@@ -256,6 +274,20 @@ class RegisterApp:
         token = headers.get("X-Drain-Token") or \
             headers.get("x-drain-token")
         return bool(token) and hmac.compare_digest(token, self.drain_token)
+
+    def _qexo_authorized(self, headers):
+        """The qexo service token (dispatch-core spec §10.4):
+        authorizes POST /api/entries and POST
+        /api/items/{n}/done|cancel on this register — Will's
+        scope — recording ``user`` as the token's identity.
+        Fail-closed when unset; authorizes NOTHING else (no
+        reads, no login, no session powers), and its scope
+        is not widenable by configuration (§10.5)."""
+        if not self.qexo_token:
+            return False
+        token = headers.get("X-Qexo-Token") or \
+            headers.get("x-qexo-token")
+        return bool(token) and hmac.compare_digest(token, self.qexo_token)
 
     def _list_log(self, headers, log, params):
         if not self._drain_authorized(headers):
@@ -272,13 +304,20 @@ class RegisterApp:
     def _close_item(self, headers, body, number, outcome):
         """Shared handler for /done (outcome "done") and /cancel
         (outcome "cancelled") — identical auth, CSRF, number, and
-        note contracts; only the recorded outcome differs."""
-        _, rec, err = self._require_session(headers)
-        if err:
-            return err
-        err = self._require_csrf(headers, rec)
-        if err:
-            return err
+        note contracts; only the recorded outcome differs. The
+        qexo service token is the second authorized writer
+        (§10.4): same number and note contracts, no session, and
+        the atom records the token's identity as its user."""
+        if self._qexo_authorized(headers):
+            uid = "qexo"
+        else:
+            _, rec, err = self._require_session(headers)
+            if err:
+                return err
+            err = self._require_csrf(headers, rec)
+            if err:
+                return err
+            uid = rec["uid"]
         # Optional close rationale: {"note": "..."} captured by the
         # page's close dialog. No body (or an empty object) is exactly
         # the pre-dialog behavior — a bare resolution atom.
@@ -300,7 +339,7 @@ class RegisterApp:
         if number not in known:
             return _err(404, "unknown register number")
         fields = {"type": "resolution", "register_number": number,
-                  "user": rec["uid"], "outcome": outcome}
+                  "user": uid, "outcome": outcome}
         if note:
             fields["note"] = note
         atom = self.resolutions.append(fields)

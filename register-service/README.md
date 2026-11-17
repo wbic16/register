@@ -27,6 +27,18 @@ drain time. Headless drains authenticate with a dedicated drain token
 (`REGSVC_DRAIN_TOKEN`, sent as `X-Drain-Token`) that authorizes only
 those two reads — never writes, never login.
 
+qexo (the dispatch core) holds the second headless credential: the
+**qexo service token** (`REGSVC_QEXO_TOKEN`, sent as `X-Qexo-Token`),
+which authorizes exactly the write legs of qexo's register
+integration (dispatch-core spec §10.4, at the scope Will ratified in
+Q2): `POST /api/entries` and `POST /api/items/{n}/done|cancel`, on
+this register only, with atoms recording `user` as the token's
+identity (`qexo`). Number validation and note limits are the session
+path's, unchanged. The token authorizes nothing else — no reads, no
+login, no session powers — it is bound to this register's scope and
+is not widenable by configuration, and when the env value is unset
+the legs fail closed.
+
 ## Layout
 
 - `regsvc/` — the service (stdlib HTTP; deps: `ldap3`, `webauthn`).
